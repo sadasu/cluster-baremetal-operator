@@ -6,9 +6,14 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"golang.org/x/net/context"
+	v1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	fakekube "k8s.io/client-go/kubernetes/fake"
+	faketesting "k8s.io/client-go/testing"
 )
 
 const testNamespace = "test-namespce"
@@ -29,44 +34,46 @@ func TestGenerateRandomPassword(t *testing.T) {
 	}
 }
 
-// Testing the case where the Mariadb password already exists
-// First we create a Mariadb Password using the method being tested.
-// Then we attenpt to create it again by calling the method again.
-// Instead of creating a new one, it should return the pre-existing secret
 func TestCreateMariadbPasswordSecret(t *testing.T) {
-	kubeClient := fakekube.NewSimpleClientset(nil...)
-	client := kubeClient.CoreV1()
 
-	// First create a mariadb password secret
-	if err := CreateMariadbPasswordSecret(kubeClient.CoreV1(), testNamespace); err != nil {
-		t.Fatalf("Failed to create first Mariadb password. %s ", err)
-	}
-	// Read and get Mariadb password from Secret just created.
-	oldMariadbPassword, err := client.Secrets(testNamespace).Get(context.Background(), baremetalSecretName, metav1.GetOptions{})
-	if err != nil {
-		t.Fatal("Failure getting the first Mariadb password that just got created.")
-	}
-	oldPassword, ok := oldMariadbPassword.StringData[baremetalSecretKey]
-	if !ok || oldPassword == "" {
-		t.Fatal("Failure reading first Mariadb password from Secret.")
+	cases := []struct {
+		name string
+
+		secretError   *errors.StatusError
+		expectedError error
+	}{
+		{
+			name:          "new-secret",
+			expectedError: nil,
+		},
+		{
+			name: "error-fetching-secret",
+
+			secretError:   errors.NewServiceUnavailable("an error"),
+			expectedError: errors.NewServiceUnavailable("an error"),
+		},
 	}
 
-	// The pasword definitely exists. Try creating again.
-	if err := CreateMariadbPasswordSecret(kubeClient.CoreV1(), testNamespace); err != nil {
-		t.Fatal("Failure creating second Mariadb password.")
-	}
-	newMariadbPassword, err := client.Secrets(testNamespace).Get(context.Background(), baremetalSecretName, metav1.GetOptions{})
-	if err != nil {
-		t.Fatal("Failure getting the second Mariadb password.")
-	}
-	newPassword, ok := newMariadbPassword.StringData[baremetalSecretKey]
-	if !ok || newPassword == "" {
-		t.Fatal("Failure reading second Mariadb password from Secret.")
-	}
-	if oldPassword != newPassword {
-		t.Fatalf("Both passwords do not match.")
-	} else {
-		t.Logf("First Mariadb password is being preserved over re-creation as expected.")
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			secretsResource := schema.GroupVersionResource{Group: "", Version: "v1", Resource: "secrets"}
+
+			kubeClient := fakekube.NewSimpleClientset(nil...)
+
+			if tc.secretError != nil {
+				kubeClient.Fake.PrependReactor("get", "secrets", func(action faketesting.Action) (handled bool, ret runtime.Object, err error) {
+					return true, &v1.Secret{}, tc.secretError
+				})
+			}
+
+			err := CreateMariadbPasswordSecret(kubeClient.CoreV1(), testNamespace)
+			assert.Equal(t, tc.expectedError, err)
+
+			if tc.expectedError == nil {
+				secret, _ := kubeClient.Tracker().Get(secretsResource, testNamespace, "metal3-mariadb-password")
+				assert.NotEmpty(t, secret.(*v1.Secret).StringData[baremetalSecretKey])
+			}
+		})
 	}
 }
 
