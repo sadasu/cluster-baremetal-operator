@@ -16,11 +16,16 @@ limitations under the License.
 package provisioning
 
 import (
+	"bytes"
+	"flag"
 	"fmt"
+	"io/ioutil"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
+	diff "k8s.io/apimachinery/pkg/util/diff"
+	json "k8s.io/apimachinery/pkg/util/json"
 
 	metal3iov1alpha1 "github.com/openshift/cluster-baremetal-operator/api/v1alpha1"
 )
@@ -151,6 +156,8 @@ func TestNewMetal3InitContainers(t *testing.T) {
 
 }
 
+var update = flag.Bool("update", false, "generate .golden files for the fixture")
+
 func TestNewMetal3Containers(t *testing.T) {
 	managedSpec := metal3iov1alpha1.ProvisioningSpec{
 		ProvisioningInterface:     "eth0",
@@ -208,7 +215,26 @@ func TestNewMetal3Containers(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Logf("Testing tc : %s", tc.name)
 			actualContainers := newMetal3Containers(&images, &tc.config)
-			assert.Equal(t, tc.expectedContainers, len(actualContainers), fmt.Sprintf("%s : Expected number of Containers : %d Actual number of Containers : %d", tc.name, tc.expectedContainers, len(actualContainers)))
+
+			goldenName := "testdata/" + tc.name + ".golden"
+
+			var actual []byte
+			for _, c := range actualContainers {
+				actualContainer, _ := json.Marshal(c)
+				actual = append(actual, actualContainer...)
+			}
+
+			if *update {
+				ioutil.WriteFile(goldenName, actual, 0666)
+				t.Skipf("Test skipped, golden file generated")
+				return
+			}
+
+			expected, _ := ioutil.ReadFile(goldenName)
+			if !bytes.Equal(expected, actual) {
+				diffStr := diff.StringDiff(string(expected), string(actual))
+				t.Errorf("match error: %s", diffStr)
+			}
 		})
 	}
 }
